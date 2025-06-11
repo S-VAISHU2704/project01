@@ -1,1 +1,102 @@
+# Flask-based core backend for student registration and verification
+
+from flask import Flask, request, jsonify, session
+from flask_sqlalchemy import SQLAlchemy
+from flask_mail import Mail, Message
+from werkzeug.security import generate_password_hash, check_password_hash
+import os
+
+app = Flask(__name__)
+app.secret_key = os.urandom(24)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///students.db'
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = 'your-email@gmail.com'  # Replace
+app.config['MAIL_PASSWORD'] = 'your-app-password'     # Replace
+
+db = SQLAlchemy(app)
+mail = Mail(app)
+
+# --- Models ---
+class Student(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100))
+    email = db.Column(db.String(100), unique=True)
+    password_hash = db.Column(db.String(200))
+    verified = db.Column(db.Boolean, default=False)
+    holidays = db.relationship('Holiday', backref='student')
+
+class Holiday(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('student.id'))
+    date = db.Column(db.String(20))
+    description = db.Column(db.String(100))
+
+# --- Routes ---
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    hashed_pw = generate_password_hash(data['password'])
+    new_student = Student(name=data['name'], email=data['email'], password_hash=hashed_pw)
+    db.session.add(new_student)
+    db.session.commit()
+    return jsonify({'message': 'Registered successfully. Please verify email.'}), 201
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    student = Student.query.filter_by(email=data['email']).first()
+    if student and check_password_hash(student.password_hash, data['password']):
+        session['student_id'] = student.id
+        return jsonify({'message': 'Login successful', 'verified': student.verified})
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+@app.route('/profile', methods=['GET'])
+def profile():
+    student_id = session.get('student_id')
+    if not student_id:
+        return jsonify({'message': 'Not logged in'}), 403
+    student = Student.query.get(student_id)
+    return jsonify({'name': student.name, 'email': student.email, 'verified': student.verified})
+
+@app.route('/upload-holidays', methods=['POST'])
+def upload_holidays():
+    student_id = session.get('student_id')
+    if not student_id:
+        return jsonify({'message': 'Not logged in'}), 403
+    holidays = request.get_json().get('holidays')
+    for item in holidays:
+        new_holiday = Holiday(student_id=student_id, date=item['date'], description=item['desc'])
+        db.session.add(new_holiday)
+    db.session.commit()
+    return jsonify({'message': 'Holidays uploaded'})
+
+@app.route('/verify-email', methods=['POST'])
+def verify_email():
+    student_id = session.get('student_id')
+    if not student_id:
+        return jsonify({'message': 'Not logged in'}), 403
+    student = Student.query.get(student_id)
+    otp = '123456'  # In production, generate random OTP
+    msg = Message('Your OTP Code', sender='your-email@gmail.com', recipients=[student.email])
+    msg.body = f'Your verification OTP is {otp}'
+    mail.send(msg)
+    session['otp'] = otp
+    return jsonify({'message': 'OTP sent to your email'})
+
+@app.route('/confirm-otp', methods=['POST'])
+def confirm_otp():
+    user_otp = request.get_json().get('otp')
+    if user_otp == session.get('otp'):
+        student = Student.query.get(session['student_id'])
+        student.verified = True
+        db.session.commit()
+        return jsonify({'message': 'Email verified'})
+    return jsonify({'message': 'Invalid OTP'}), 400
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
 
